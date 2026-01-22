@@ -1,0 +1,16 @@
+{
+    "manifest_version": 3,
+    "name": "VERIFAI - AI Video Detection",
+    "version": "1.0",
+    "description": "See Exactly Why. Detect Frame-by-Frame. Trust the Evidence.",
+    "permissions": [
+        "activeTab",
+        "scripting"
+    ],
+    "action": {
+        "default_popup": "popup.html"
+    },
+    "host_permissions": [
+        "http://localhost:8000/*"
+    ]
+}

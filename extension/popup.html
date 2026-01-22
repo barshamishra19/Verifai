@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>🎬 VERIFAI</h1>
+            <p>Multimodal AI Forensic Lab</p>
+        </header>
+
+        <div id="upload-view">
+            <button id="scan-btn" style="margin-bottom: 15px; background: #6c5ce7;">🔍 Scan Video on Page</button>
+            
+            <div class="drop-zone">
+                <input type="file" id="video-input" accept="video/*">
+                <p>Or click to upload file</p>
+            </div>
+            <button id="analyze-btn" class="hidden">Analyze Upload</button>
+        </div>
+
+        <div id="loading-view" class="hidden">
+            <div class="spinner"></div>
+            <p>Running 4-Engine Analysis...</p>
+        </div>
+
+        <div id="result-view" class="hidden">
+            <div id="verdict-badge"></div>
+            <div class="score-row">
+                <span id="score-pct">0%</span> Confidence
+            </div>
+            <div id="evidence-container">
+                <!-- Evidence injected here -->
+            </div>
+            <button id="reset-btn">New Scan</button>
+        </div>
+    </div>
+    <script src="popup.js"></script>
+</body>
+
+</html>
