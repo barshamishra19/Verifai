@@ -3,27 +3,41 @@ import time
 import shutil
 import uuid
 import numpy as np
-import math  # Added for NaN checking
+import math
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from pydantic import BaseModel
-import requests
+from fastapi.middleware.cors import CORSMiddleware
+
+# Internal Imports
 from models.spatial_detector import SpatialDetector
 from models.temporal_detector import TemporalAnalyzer
 from models.forensic_detector import ForensicDetector
 from models.metadata_detector import MetadataDetector
 from utils.video_processor import extract_frames
 from utils.reasoning_engine import generate_reasoning
+from utils.video_downloader import download_video
 from database import init_db, save_analysis_result
 
 app = FastAPI()
 
-# --- STARTUP LOGIC ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get("/")
+def read_root():
+    return {"status": "Success", "message": "VerifAI Backend is Running"}
+
+# Initialize
 init_db()
 UPLOAD_DIR = "uploads"
 if not os.path.exists(UPLOAD_DIR):
     os.makedirs(UPLOAD_DIR)
 
-# Init Engines
 spatial_engine = SpatialDetector()
 temporal_engine = TemporalAnalyzer()
 forensic_engine = ForensicDetector()
@@ -32,7 +46,6 @@ metadata_engine = MetadataDetector()
 class URLRequest(BaseModel):
     url: str
 
-# Helper function to prevent NaN JSON errors
 def safe_float(value):
     try:
         if isinstance(value, (list, np.ndarray)) and len(value) == 0:
@@ -42,136 +55,164 @@ def safe_float(value):
     except:
         return 0.0
 
-def download_video(url: str, save_path: str):
-    try:
-        # NOTE: This works for direct .mp4 links. 
-        # For YouTube/Shorts, you should use 'yt-dlp' library instead of requests.
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        with requests.get(url, stream=True, headers=headers, timeout=15) as r:
-            r.raise_for_status()
-            with open(save_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192): 
-                    f.write(chunk)
-        return True
-    except Exception as e:
-        print(f"Download Error: {e}")
-        return False
-
 @app.post("/api/analyze_url")
 async def analyze_url(request: URLRequest):
     start_time = time.time()
     job_id = str(uuid.uuid4())
     
-    filename = request.url.split("/")[-1].split("?")[0] or "video.mp4"
-    if not filename.endswith(('.mp4', '.mov', '.avi')): filename += ".mp4"
-    file_path = os.path.join(UPLOAD_DIR, f"{job_id}_{filename}")
+    # 1. Validate URL
+    video_url = request.url.strip()
+    if not video_url:
+        raise HTTPException(status_code=400, detail="URL is empty")
+
+    print(f"🔍 Analyzing URL: {video_url}")
     
-    if not download_video(request.url, file_path):
-        raise HTTPException(status_code=400, detail="Failed to download video. Link might be private or blocked.")
+    # Create filename
+    filename = f"{job_id}_video.mp4"
+    file_path = os.path.join(UPLOAD_DIR, filename)
+    
+    # 2. Download
+    print(f"📥 Downloading video...")
+    success, error_msg = download_video(video_url, file_path)
+    
+    if not success:
+        print(f"❌ Download failed: {error_msg}")
+        raise HTTPException(status_code=400, detail=f"Download failed: {error_msg}")
     
     try:
+        # 3. Process Video
         frames = extract_frames(file_path)
-        
-        # ERROR HANDLING: If no frames extracted, don't proceed to math
-        if not frames or len(frames) == 0:
-            raise HTTPException(status_code=422, detail="Could not process video frames. The file might be corrupted or not a valid video.")
+        if not frames:
+            raise HTTPException(status_code=422, detail="Could not extract frames from video.")
 
-        # 2. Run Engines with NaN protection
+        # 4. Run Engines
         spatial_scores = [spatial_engine.detect(f) for f in frames[:10]]
         avg_spatial = safe_float([res['fake_confidence'] if isinstance(res, dict) else res for res in spatial_scores])
         
-        avg_temporal_res = temporal_engine.detect_motion_smoothness(frames)
+        avg_temporal_res = temporal_engine.detect_all_temporal(frames)
         avg_temporal = safe_float(avg_temporal_res['confidence'] if isinstance(avg_temporal_res, dict) else avg_temporal_res)
         
-        if hasattr(forensic_engine, 'detect_artifacts'):
-            forensic_scores = [forensic_engine.detect_artifacts(f) for f in frames[:5]]
-        else:
-            forensic_scores = [0.5] 
+        forensic_scores = [forensic_engine.detect_all_artifacts(f) for f in frames[:5]]
         avg_forensic = safe_float([res['confidence'] if isinstance(res, dict) else res for res in forensic_scores])
         
         avg_metadata_res = metadata_engine.check_metadata(file_path)
         avg_metadata = safe_float(avg_metadata_res['confidence'] if isinstance(avg_metadata_res, dict) else avg_metadata_res)
         
-        # 3. Ensemble
-        final_score = (avg_spatial * 0.30 + avg_temporal * 0.35 + avg_forensic * 0.25 + avg_metadata * 0.10)
-        final_score = safe_float(final_score)
+        # 5. Ensemble Calculation (Refined for Higher Sensitivity)
+        # We use a weighted average, but also check for "Red Flags"
+        base_score = (avg_spatial * 0.35 + avg_temporal * 0.30 + avg_forensic * 0.25 + avg_metadata * 0.10)
         
-        classification = "AI-Generated" if final_score > 0.5 else "Real"
+        # Red Flag: If Spatial or Forensic is extremely confident, AI detection is likely
+        # even if other engines (like Temporal) are confused by video quality.
+        red_flag_boost = 0
+        if avg_spatial > 0.8: red_flag_boost = max(red_flag_boost, 0.2)
+        if avg_forensic > 0.75: red_flag_boost = max(red_flag_boost, 0.2)
+        
+        final_score = safe_float(base_score + red_flag_boost)
+        
+        # Classification threshold back to 0.50 for better sensitivity
+        classification = "AI-Generated" if final_score > 0.50 else "Real"
+        
+        display_score = final_score
         evidence = generate_reasoning(avg_spatial, avg_temporal, avg_forensic, avg_metadata)
         
         report = {
             "job_id": job_id,
-            "final_confidence": round(final_score, 4),
+            "final_confidence": round(display_score, 4),
             "classification": classification,
             "evidence": evidence,
             "processing_time_ms": round((time.time() - start_time) * 1000, 2)
         }
 
-        save_analysis_result(job_id, filename, report, {"spatial": avg_spatial, "temporal": avg_temporal, "forensic": avg_forensic, "metadata": avg_metadata})
+        save_analysis_result(job_id, filename, report, {
+            "spatial": avg_spatial, "temporal": avg_temporal, 
+            "forensic": avg_forensic, "metadata": avg_metadata
+        })
         return report
 
     finally:
-        if os.path.exists(file_path): os.remove(file_path)
-        if os.path.exists("temp_frames"): shutil.rmtree("temp_frames")
+        # Cleanup
+        if os.path.exists(file_path): 
+            try: os.remove(file_path)
+            except: pass
+        if os.path.exists("temp_frames"): 
+            try: shutil.rmtree("temp_frames")
+            except: pass
 
 @app.post("/api/analyze")
 async def analyze_video(file: UploadFile = File(...)):
     start_time = time.time()
     job_id = str(uuid.uuid4())
-    file_path = os.path.join(UPLOAD_DIR, f"{job_id}_{file.filename}")
     
-    with open(file_path, "wb") as f:
-        f.write(await file.read())
+    # Create filename and save
+    filename = f"{job_id}_{file.filename}"
+    file_path = os.path.join(UPLOAD_DIR, filename)
     
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+        
     try:
+        # Process Video (Same logic as analyze_url)
         frames = extract_frames(file_path)
-        if not frames or len(frames) == 0:
-            raise HTTPException(status_code=422, detail="No frames could be extracted from the uploaded video.")
+        if not frames:
+            raise HTTPException(status_code=422, detail="Could not extract frames from video.")
 
+        # Run Engines
         spatial_scores = [spatial_engine.detect(f) for f in frames[:10]]
         avg_spatial = safe_float([res['fake_confidence'] if isinstance(res, dict) else res for res in spatial_scores])
         
-        avg_temporal_res = temporal_engine.detect_motion_smoothness(frames)
+        avg_temporal_res = temporal_engine.detect_all_temporal(frames)
         avg_temporal = safe_float(avg_temporal_res['confidence'] if isinstance(avg_temporal_res, dict) else avg_temporal_res)
         
-        if hasattr(forensic_engine, 'detect_artifacts'):
-            forensic_scores = [forensic_engine.detect_artifacts(f) for f in frames[:5]]
-        else:
-            forensic_scores = [0.5] 
+        forensic_scores = [forensic_engine.detect_all_artifacts(f) for f in frames[:5]]
         avg_forensic = safe_float([res['confidence'] if isinstance(res, dict) else res for res in forensic_scores])
         
         avg_metadata_res = metadata_engine.check_metadata(file_path)
         avg_metadata = safe_float(avg_metadata_res['confidence'] if isinstance(avg_metadata_res, dict) else avg_metadata_res)
         
-        final_score = safe_float(avg_spatial * 0.30 + avg_temporal * 0.35 + avg_forensic * 0.25 + avg_metadata * 0.10)
+        # Ensemble Calculation (Refined for Higher Sensitivity)
+        base_score = (avg_spatial * 0.35 + avg_temporal * 0.30 + avg_forensic * 0.25 + avg_metadata * 0.10)
         
-        classification = "AI-Generated" if final_score > 0.5 else "Real"
+        # Red Flag: If Spatial or Forensic is extremely confident, AI detection is likely
+        red_flag_boost = 0
+        if avg_spatial > 0.8: red_flag_boost = max(red_flag_boost, 0.2)
+        if avg_forensic > 0.75: red_flag_boost = max(red_flag_boost, 0.2)
+        
+        final_score = safe_float(base_score + red_flag_boost)
+        classification = "AI-Generated" if final_score > 0.50 else "Real"
+        
+        display_score = final_score
         evidence = generate_reasoning(avg_spatial, avg_temporal, avg_forensic, avg_metadata)
         
         report = {
             "job_id": job_id,
-            "final_confidence": round(final_score, 4),
+            "final_confidence": round(display_score, 4),
             "classification": classification,
             "evidence": evidence,
             "processing_time_ms": round((time.time() - start_time) * 1000, 2)
         }
 
-        save_analysis_result(job_id, file.filename, report, {"spatial": avg_spatial, "temporal": avg_temporal, "forensic": avg_forensic, "metadata": avg_metadata})
+        save_analysis_result(job_id, filename, report, {
+            "spatial": avg_spatial, "temporal": avg_temporal, 
+            "forensic": avg_forensic, "metadata": avg_metadata
+        })
         return report
 
     finally:
-        if os.path.exists(file_path): os.remove(file_path)
-        if os.path.exists("temp_frames"): shutil.rmtree("temp_frames")
+        # Cleanup
+        if os.path.exists(file_path): 
+            try: os.remove(file_path)
+            except: pass
 
-def generate_reasoning(spatial, temporal, forensic, metadata):
-    evidence = []
-    if spatial > 0.7:
-        evidence.append({"type": "Spatial", "explanation": "Detected distortions in skin texture/hand geometry."})
-    if temporal > 0.7:
-        evidence.append({"type": "Temporal", "explanation": "Movement is unnaturally smooth (Characteristic of AI)."})
-    if forensic > 0.6:
-        evidence.append({"type": "Forensic", "explanation": "Frequency domain spikes match GAN/Diffusion fingerprints."})
-    return evidence
+@app.get("/api/history")
+async def get_history():
+    from database import get_analysis_history
+    return get_analysis_history(limit=50)
+
+@app.get("/api/stats")
+async def get_stats():
+    from database import get_statistics
+    return get_statistics()
 
 if __name__ == "__main__":
     import uvicorn

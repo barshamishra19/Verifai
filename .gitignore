@@ -1,0 +1,17 @@
+# Python Environment & Cache
+.venv/
+__pycache__/
+*.pyc
+
+# Local Databases and text results
+*.db
+results.txt
+latest_result.txt
+
+# Temporary Video Files (The ones starting with 'temp_')
+temp_*.mp4
+backend/temp_*.mp4
+
+# Folders to keep empty on GitHub
+backend/uploads/*
+!backend/uploads/.gitkeep

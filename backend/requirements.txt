@@ -1,9 +1,12 @@
 fastapi
 uvicorn
-torch
 transformers
+torch
 opencv-python
 numpy
-pillow
-scipy
+Pillow
+yt-dlp
+exifread
+pymediainfo
+requests
 python-multipart

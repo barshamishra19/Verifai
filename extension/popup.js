@@ -38,20 +38,38 @@ document.getElementById('scan-btn').addEventListener('click', async () => {
     startLoading();
 
     try {
-        // Execute script to find video
-        const injectionResults = await chrome.scripting.executeScript({
-            target: { tabId: tab.id },
-            func: () => {
-                const v = document.querySelector('video');
-                if (!v) return null;
-                return v.src || (v.querySelector('source') ? v.querySelector('source').src : null);
-            }
-        });
+        const url = tab.url.toLowerCase();
+        const isSocialMedia = ['youtube.com', 'youtu.be', 'tiktok.com', 'instagram.com', 'twitter.com', 'x.com'].some(s => url.includes(s));
 
-        const videoUrl = injectionResults[0].result;
+        let videoUrl = null;
 
-        if (!videoUrl) {
-            alert("No video found on this page.");
+        if (isSocialMedia) {
+            // For social media, the page URL IS the video URL for yt-dlp
+            videoUrl = tab.url;
+            console.log("Social media detected, using Page URL:", videoUrl);
+        } else {
+            // Execute script to find video for static sites
+            const injectionResults = await chrome.scripting.executeScript({
+                target: { tabId: tab.id },
+                func: () => {
+                    const v = document.querySelector('video');
+                    if (v) return v.src || (v.querySelector('source') ? v.querySelector('source').src : null);
+
+                    // Fallback for sites that might hide video tags
+                    const iframe = document.querySelector('iframe[src*="video"], iframe[src*="embed"]');
+                    if (iframe) return iframe.src;
+
+                    return null;
+                }
+            });
+            videoUrl = injectionResults[0].result;
+        }
+
+        if (!videoUrl || videoUrl.startsWith('blob:')) {
+            const msg = videoUrl?.startsWith('blob:')
+                ? "This video format (blob) is protected and cannot be scanned directly. Try scanning the main page URL instead."
+                : "No scanable video found on this page.";
+            alert(msg);
             resetUI();
             return;
         }
